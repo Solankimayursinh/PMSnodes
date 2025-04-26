@@ -2,11 +2,96 @@ import torchaudio
 import folder_paths
 import os
 import io
+import torch
+from PIL import Image
+import numpy as np
+from io import BytesIO
 import json
 import struct
 from comfy.cli_args import args
 import base64
 from server import PromptServer
+
+class PMSSendImage:
+    def __init__(self):
+        pass
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE", {"default": None, "forceInput": True}),
+                "Actions": ("STRING", {"default": None})}
+            }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("IMAGE",)
+
+    FUNCTION = "sendimgtowc"
+
+    OUTPUT_NODE = True
+
+    CATEGORY = "PMSnodes"
+    
+    def sendimgtowc(self, images, Actions = ""):
+        outs = []
+
+        for single_image in images:
+            img = np.asarray(single_image * 255., dtype=np.uint8)
+            img = Image.fromarray(img)
+            buffered = BytesIO()
+            img.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            outs.append(img_str)
+
+        PromptServer.instance.send_sync("knodes", {"images": outs, "Actions": Actions})
+
+        return (images,)
+
+class LoadImageBase64:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"image": ("STRING", {"multiline": True})}}
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+
+    CATEGORY = "PMSnodes"
+
+    FUNCTION = "LoadbaseImg"
+
+    def LoadbaseImg(self, image):
+        imgdata = base64.b64decode(image)
+        img = Image.open(BytesIO(imgdata))
+
+        if "A" in img.getbands():
+            mask = np.array(img.getchannel("A")).astype(np.float32) / 255.0
+            mask = 1.0 - torch.from_numpy(mask)
+        else:
+            mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+
+        img = img.convert("RGB")
+        img = np.array(img).astype(np.float32) / 255.0
+        img = torch.from_numpy(img)[None,]
+
+        return (img, mask)
+
+class LoadMaskBase64:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"mask": ("STRING", {"multiline": False})}}
+
+    RETURN_TYPES = ("MASK",)
+    CATEGORY = "PMSnodes"
+    FUNCTION = "pmsload_mask"
+
+    def pmsload_mask(self, mask):
+        imgdata = base64.b64decode(mask)
+        img = Image.open(BytesIO(imgdata))
+        img = np.array(img).astype(np.float32) / 255.0
+        img = torch.from_numpy(img)
+        if img.dim() == 3:  # RGB(A) input, use red channel
+            img = img[:, :, 0]
+        return (img.unsqueeze(0),)
 
 class LoadBase64Audio:
     @classmethod
@@ -148,8 +233,28 @@ class PMSSendAudio:
         PromptServer.instance.send_sync("pmsnodes", {"audio": base64_encodedaudio})
         return { "ui": { "audio": results } }
 
+class PMSLoadText:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text_input": ("STRING", {"default": "Enter your text here", "multiline": True}),
+            }
+        }
+    
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "load_text"
+    CATEGORY = "PMSnodes"
+    
+    def load_text(self, text_input):
+        return (text_input,)
+        
 NODE_CLASS_MAPPINGS = {
     "PMSSendAudio": PMSSendAudio,
-    "LoadBase64Audio" : LoadBase64Audio
+    "LoadBase64Audio" : LoadBase64Audio,
+    "PMSLoadText": PMSLoadText,
+    "PMSSendImage" : PMSSendImage,
+    "LoadImageBase64" : LoadImageBase64,
+    "LoadMaskBase64" : LoadMaskBase64,
     
 }
